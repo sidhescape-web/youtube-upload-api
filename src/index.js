@@ -21,6 +21,7 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const YOUTUBE_CLIENT_ID = process.env.YOUTUBE_CLIENT_ID;
 const YOUTUBE_CLIENT_SECRET = process.env.YOUTUBE_CLIENT_SECRET;
+const API_KEY = process.env.API_KEY;
 
 // In-memory job store (use Redis/database in production for persistence)
 const jobs = new Map();
@@ -31,7 +32,15 @@ let storedRefreshToken = null;
 // Parse JSON bodies (for metadata - actual video is streamed from URL)
 app.use(express.json({ limit: '1mb' }));
 
-// Health check endpoint
+// API key middleware (only enforced when API_KEY env is set)
+const requireApiKey = (req, res, next) => {
+  if (!API_KEY) return next();
+  const key = req.headers['x-api-key'] || req.headers['api-key'] || req.headers['authorization']?.replace(/^Bearer\s+/i, '').trim();
+  if (key && key === API_KEY) return next();
+  res.status(401).json({ error: 'Invalid or missing API key', hint: 'Add X-API-Key header with your API_KEY value' });
+};
+
+// Health check endpoint (no API key required)
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
@@ -120,9 +129,9 @@ app.get('/auth/status', (req, res) => {
 });
 
 /**
- * GET /job/:id - Poll upload job status
+ * GET /job/:id - Poll upload job status (requires API key if API_KEY env is set)
  */
-app.get('/job/:id', (req, res) => {
+app.get('/job/:id', requireApiKey, (req, res) => {
   const job = jobs.get(req.params.id);
   if (!job) {
     return res.status(404).json({ error: 'Job not found', jobId: req.params.id });
@@ -143,7 +152,7 @@ app.get('/job/:id', (req, res) => {
  *   - contentType: Optional - defaults to 'video/webm'
  *   - sync: Optional - if true, wait for upload to complete before responding
  */
-app.post('/upload', async (req, res) => {
+app.post('/upload', requireApiKey, async (req, res) => {
   const {
     videoUrl,
     uploadUrl,
