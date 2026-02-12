@@ -481,7 +481,7 @@ async function attemptStreamUpload({ videoUrl, uploadUrl, oauthToken, contentTyp
         let body = '';
         putRes.on('data', (chunk) => { body += chunk; });
         putRes.on('end', () => {
-          if (putRes.statusCode === 201) {
+          if (putRes.statusCode === 201 || putRes.statusCode === 200) {
             let videoId = null;
             try {
               const json = JSON.parse(body);
@@ -489,7 +489,7 @@ async function attemptStreamUpload({ videoUrl, uploadUrl, oauthToken, contentTyp
             } catch (_) {}
 
             resolve({
-              statusCode: 201,
+              statusCode: putRes.statusCode,
               videoId,
               rawResponse: body.length > 0 ? body : undefined,
             });
