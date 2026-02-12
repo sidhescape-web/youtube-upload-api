@@ -428,33 +428,86 @@ async function getAccessTokenFromRefresh({ clientId, clientSecret, refreshToken 
 }
 
 /**
- * Fetch Content-Length from source URL via HEAD request.
- * YouTube's resumable upload expects Content-Length for the PUT.
+ * Fetch Content-Length from source URL.
+ * Handles presigned URLs: follows redirects, falls back to Range request if HEAD fails.
  */
 async function getContentLength(url) {
+  return getContentLengthWithRedirects(url, 0, 5);
+}
+
+async function getContentLengthWithRedirects(url, redirectCount, maxRedirects) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const client = parsed.protocol === 'https:' ? https : http;
 
-    const req = client.request(url, { method: 'HEAD' }, (res) => {
+    const options = { method: 'HEAD' };
+    const req = client.request(url, options, (res) => {
+      // Follow redirects (presigned URLs often redirect)
+      if ([301, 302, 307, 308].includes(res.statusCode)) {
+        const location = res.headers.location;
+        if (location && redirectCount < maxRedirects) {
+          req.destroy();
+          const nextUrl = location.startsWith('http') ? location : new URL(location, url).href;
+          console.log('[getContentLength] Redirect', redirectCount + 1, '->', nextUrl.slice(0, 60) + '...');
+          return getContentLengthWithRedirects(nextUrl, redirectCount + 1, maxRedirects).then(resolve).catch(reject);
+        }
+      }
+
       const len = res.headers['content-length'];
       if (len != null) {
         const size = parseInt(len, 10);
         console.log('[getContentLength] OK:', size, 'bytes');
-        resolve(size);
-      } else {
-        console.log('[getContentLength] FAIL: no Content-Length');
-        reject(new Error('Source URL does not provide Content-Length. Pass contentLength in the request body.'));
+        return resolve(size);
       }
+
+      // HEAD may not return Content-Length for some presigned URLs - try Range: bytes=0-0
+      console.log('[getContentLength] No Content-Length on HEAD, trying Range request');
+      req.destroy();
+      getContentLengthViaRange(url, redirectCount, maxRedirects).then(resolve).catch(reject);
     });
 
     req.on('error', (e) => {
       console.log('[getContentLength] ERROR:', e.message);
       reject(e);
     });
-    req.setTimeout(15000, () => {
-      req.destroy(new Error('HEAD request timeout'));
+    req.setTimeout(15000, () => req.destroy(new Error('HEAD request timeout')));
+    req.end();
+  });
+}
+
+/** Fallback: GET with Range bytes=0-0 to get Content-Range (total size) from presigned URLs */
+async function getContentLengthViaRange(url, redirectCount, maxRedirects) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const client = parsed.protocol === 'https:' ? https : http;
+
+    const options = { method: 'GET', headers: { Range: 'bytes=0-0' } };
+    const req = client.request(url, options, (res) => {
+      if ([301, 302, 307, 308].includes(res.statusCode)) {
+        const location = res.headers.location;
+        if (location && redirectCount < maxRedirects) {
+          req.destroy();
+          const nextUrl = location.startsWith('http') ? location : new URL(location, url).href;
+          return getContentLengthViaRange(nextUrl, redirectCount + 1, maxRedirects).then(resolve).catch(reject);
+        }
+      }
+
+      const contentRange = res.headers['content-range'];
+      if (contentRange) {
+        const match = contentRange.match(/bytes \d+-\d+\/(\d+)/);
+        if (match) {
+          const size = parseInt(match[1], 10);
+          console.log('[getContentLength] Got size from Content-Range:', size, 'bytes');
+          return resolve(size);
+        }
+      }
+
+      res.resume(); // drain response body
+      reject(new Error('Presigned URL does not provide Content-Length or Content-Range. Pass contentLength in the request body.'));
     });
+
+    req.on('error', reject);
+    req.setTimeout(15000, () => req.destroy(new Error('Range request timeout')));
     req.end();
   });
 }
@@ -489,16 +542,35 @@ async function streamVideoToYouTube({ videoUrl, uploadUrl, oauthToken, contentTy
 
 /**
  * Single attempt: download from videoUrl and PUT to uploadUrl.
+ * Follows redirects for presigned URLs.
  */
 async function attemptStreamUpload({ videoUrl, uploadUrl, oauthToken, contentType, contentLength }) {
+  return attemptStreamUploadWithRedirects({ videoUrl, uploadUrl, oauthToken, contentType, contentLength }, 0, 5);
+}
+
+async function attemptStreamUploadWithRedirects({ videoUrl, uploadUrl, oauthToken, contentType, contentLength }, redirectCount, maxRedirects) {
   return new Promise((resolve, reject) => {
     const parsedSource = new URL(videoUrl);
     const httpModule = parsedSource.protocol === 'https:' ? https : http;
 
     console.log('[attemptStreamUpload] Starting download from', videoUrl.slice(0, 60) + '...');
 
-    // Initiate download stream
     const getReq = httpModule.get(videoUrl, (getRes) => {
+      // Follow redirects (presigned URLs often redirect)
+      if ([301, 302, 307, 308].includes(getRes.statusCode)) {
+        const location = getRes.headers.location;
+        if (location && redirectCount < maxRedirects) {
+          getRes.resume();
+          const nextUrl = location.startsWith('http') ? location : new URL(location, videoUrl).href;
+          console.log('[attemptStreamUpload] Redirect', redirectCount + 1, '->', nextUrl.slice(0, 60) + '...');
+          return attemptStreamUploadWithRedirects(
+            { videoUrl: nextUrl, uploadUrl, oauthToken, contentType, contentLength },
+            redirectCount + 1,
+            maxRedirects
+          ).then(resolve).catch(reject);
+        }
+      }
+
       if (getRes.statusCode >= 400) {
         console.log('[attemptStreamUpload] Download FAILED HTTP', getRes.statusCode);
         reject(new Error(`Failed to download video: HTTP ${getRes.statusCode}`));

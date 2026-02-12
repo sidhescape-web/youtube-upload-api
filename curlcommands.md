@@ -2,7 +2,9 @@
 
 Base URL: `https://youtube-upload-api-production.up.railway.app`
 
-**API Key:** If you set `API_KEY` in Railway env, add this header to all upload and job requests:
+**API Key:** If you set `API_KEY` in Railway env, add this header to all upload and job requests.
+
+**Presigned URLs:** S3-style presigned URLs (e.g. storageapi.dev, DigitalOcean Spaces) are supported. The API follows redirects and handles sources that don't return Content-Length on HEAD.
 ```
 X-API-Key: your-api-key
 ```
